@@ -2,7 +2,9 @@
 
 ## Overview
 
-Pipeline to cross-reference Texas Railroad Commission (RRC) drilling permits, Baker Hughes rig counts, and AFE Leaks cost data, then use Sentinel-2 satellite imagery to identify and verify active drilling rig locations in Reeves County, Texas.
+Pipeline that uses Texas Railroad Commission (RRC) reported dates, Baker Hughes rig counts, and Sentinel-2 satellite imagery to identify and verify active drilling rig locations in Reeves County, Texas.
+
+All well status classification comes from RRC-reported spud and completion dates. The satellite imagery provides independent verification, especially for permits with no spud date reported.
 
 ## Data Sources
 
@@ -13,19 +15,16 @@ Pipeline to cross-reference Texas Railroad Commission (RRC) drilling permits, Ba
 - **Download**: https://www.rrc.texas.gov/resource-center/research/data-sets-available-for-download/
 - **Format**: Fixed-width text files in ZIP archives (record layout PDFs provided)
 - **Filter**: District 08, County Code 389 (Reeves), Well Direction = H (Horizontal)
+- **Important**: Pull ALL permits for the county where spud >= period start, OR no spud date, OR spud before period with no completion yet. Not just permits filed in the analysis month.
 
 ### 2. Baker Hughes Rig Count
 - **What**: Weekly rig count by county/basin/operator
 - **Download**: Excel pivot table from https://rigcount.bakerhughes.com/na-rig-count
 - **Current**: Reeves County typically runs 15-25 rigs (~44% of Permian Basin activity)
 - **No API** - must download the Excel file manually
+- Used as a validation check, not a primary data source
 
-### 3. AFE Leaks Data
-- **What**: AFE filings, cost breakdowns, operator spending patterns
-- **Value-add**: Financial data the RRC doesn't have (AFE amounts, cost per foot, target formations)
-- **Cross-ref on**: API number to match permits to AFE cost data
-
-### 4. Sentinel-2 Satellite Imagery
+### 3. Sentinel-2 Satellite Imagery
 - **Why Sentinel-2 over Landsat**: 10m resolution vs 30m. A 150m drill pad = 15x15 pixels (Sentinel-2) vs 5x5 pixels (Landsat). 5-day revisit vs 16-day.
 - **Source**: Copernicus Data Space Ecosystem (free, requires registration)
 - **API**: OData catalog at https://catalogue.dataspace.copernicus.eu/odata/v1
@@ -34,29 +33,32 @@ Pipeline to cross-reference Texas Railroad Commission (RRC) drilling permits, Ba
 
 ## Methodology
 
-### Step 1: Identify Wells of Interest
+### Step 1: Load All Relevant Permits
 1. Download RRC permit master + status files for District 08
 2. Filter to Reeves County horizontal wells
-3. **Spud dates come directly from the RRC permit status/trailer records**
-4. Parse lat/lon for surface hole locations
+3. Spud dates come from the RRC permit status/trailer records
+4. Keep all permits where: spud >= period start OR no spud date OR still drilling (no completion)
+5. Parse lat/lon for surface hole locations
+6. Reeves County will have ~80-120+ relevant horizontal permits at any time
 
-### Step 2: Cross-Reference
-1. Match RRC permits to AFE Leaks by API number
-2. Load Baker Hughes weekly rig count for Reeves County
-3. Classify each well's February status:
-   - `SPUD_IN_FEB`: Drilling started in February (active drilling rig)
-   - `DRILLING_THROUGH_FEB`: Spud before Feb, no completion yet
-   - `COMPLETING_IN_FEB`: Drilling done, completion underway
-   - `NO_SPUD`: Permitted but no drilling reported
-   - `COMPLETED_BEFORE_FEB`: Already done
+### Step 2: Classify Well Status from Reported Dates
+Using only RRC-reported dates, classify each well:
+- `SPUD_IN_PERIOD`: Started drilling during the analysis month
+- `DRILLING_THROUGH`: Spud before the period, no completion yet (still drilling)
+- `COMPLETING`: Drilling done, completion date falls in the period
+- `NO_SPUD`: Permitted but no spud date reported
+- `COMPLETED_BEFORE`: Already done before our window
 
-### Step 3: Satellite Imagery Acquisition
-1. Define before period (January) and during period (February)
+### Step 3: Baker Hughes Validation Check
+Load the weekly rig count for Reeves County. Compare the number of wells classified as actively drilling (SPUD_IN_PERIOD + DRILLING_THROUGH) against Baker Hughes. If RRC says 32 wells are drilling and Baker Hughes says 18 rigs, the gap tells you something - some wells may have already released their rig, or the timing window is fuzzy.
+
+### Step 4: Satellite Imagery Acquisition
+1. Define before period (prior month) and during period (analysis month)
 2. Query CDSE for Sentinel-2 L2A scenes with <20% cloud cover
 3. West Texas is favorable - most scenes are usable
 4. Download B04, B03, B02, B08 bands for the area of interest
 
-### Step 4: Change Detection
+### Step 5: Change Detection
 For each well location with a 200m buffer:
 
 1. **NDVI Differencing**: Compute NDVI = (NIR - Red) / (NIR + Red) for before and during periods. NDVI drop > 0.15 indicates vegetation clearance (pad construction).
@@ -65,7 +67,7 @@ For each well location with a 200m buffer:
 
 3. **Combined Score**: 60% NDVI change weight + 40% brightness change weight.
 
-### Step 5: Classification (Drilling vs Completion)
+### Step 6: Classification (Drilling vs Completion)
 This is the critical distinction:
 
 | Signal | Drilling Rig | Completion Rig |
@@ -79,10 +81,10 @@ This is the critical distinction:
 - **MEDIUM confidence**: Change detected, no spud date to confirm phase
 - **PAD_CONSTRUCTION**: Change detected at unspud location (pad being built)
 
-### Step 6: Validation
-Compare detected drilling rigs against Baker Hughes weekly count. If Baker Hughes says 18 rigs and we detect 18 high-confidence drilling sites, the methodology is working. Large gaps indicate:
-- Missing permits in our dataset
-- Rigs on wells permitted in adjacent counties
+### Step 7: Validation
+Compare detected drilling rigs against Baker Hughes weekly count. Large gaps indicate:
+- Some wells classified as "drilling" may have already released their rig
+- Rigs on wells permitted in adjacent counties (not in our dataset)
 - Threshold calibration needed
 
 ## Key Limitations
@@ -92,6 +94,7 @@ Compare detected drilling rigs against Baker Hughes weekly count. If Baker Hughe
 3. **Cloud cover** can block views, though West Texas in winter is generally clear
 4. **New pad construction** without drilling yet produces the same NDVI/brightness change as active drilling
 5. **Multi-well pads** with simultaneous drilling complicate per-well attribution
+6. **RRC reporting lag** - spud dates may not be reported immediately, so some "NO_SPUD" wells may actually be drilling
 
 ## Running the Pipeline
 
@@ -123,10 +126,9 @@ To use with real data instead of samples:
 
 1. **RRC data**: Download permit files from RRC, place in `data/rrc/`
 2. **Baker Hughes**: Download pivot table Excel, place in `data/baker_hughes/`
-3. **AFE Leaks**: Export CSV to `data/afe_leaks/`
-4. **Sentinel-2**: Register at https://dataspace.copernicus.eu/, the pipeline will query the catalog API
+3. **Sentinel-2**: Register at https://dataspace.copernicus.eu/, the pipeline will query the catalog API
 
-Then run with `--no-sample` (or set `use_sample=False` in the pipeline call).
+Then set `use_sample=False` in the pipeline call.
 
 ## Output Files
 

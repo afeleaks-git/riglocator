@@ -313,30 +313,19 @@ if __name__ == "__main__":
 
     from rrc_permits import load_permits
     from satellite import create_synthetic_scene, get_analysis_periods
-    from afe_crossref import (
-        load_afe_data, crossref_permits_with_afe, classify_well_status,
-        identify_active_drilling_feb,
-    )
+    from well_status import classify_well_status, get_active_drilling
 
     wells = load_permits()
-    afe = load_afe_data()
-    merged = crossref_permits_with_afe(wells, afe)
-    merged = classify_well_status(merged)
-    active_drilling = identify_active_drilling_feb(merged)
+    wells = classify_well_status(wells)
+    active_drilling = get_active_drilling(wells)
 
-    # Create synthetic before/during scenes
     (before_start, before_end), (during_start, during_end) = get_analysis_periods()
 
     before_scene = create_synthetic_scene(wells, before_start)
     during_scene = create_synthetic_scene(wells, during_start, active_wells=active_drilling)
 
-    # Run change detection
     changes = detect_pad_changes(before_scene, during_scene)
-
-    # Extract per-well signatures
     detections = extract_well_signatures(changes, wells)
-
-    # Classify
     classified = classify_detections(detections)
 
     print(f"\n{'='*80}")
@@ -346,6 +335,5 @@ if __name__ == "__main__":
                        "ndvi_change_mean", "brightness_change_mean",
                        "activity_class", "confidence"]].to_string(index=False))
 
-    # Compare to rig count
     validation = estimate_rig_vs_completion(classified, rig_count_target=18)
     print(f"\n{validation['interpretation']}")
