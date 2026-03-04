@@ -49,3 +49,12 @@ BAKER_HUGHES_URL = "https://rigcount.bakerhughes.com/na-rig-count"
 # Copernicus Data Space (Sentinel-2)
 COPERNICUS_CATALOG_URL = "https://catalogue.dataspace.copernicus.eu/odata/v1"
 COPERNICUS_TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+
+# Sentinel Hub Process API (for actual imagery download)
+# Set SH_CLIENT_ID and SH_CLIENT_SECRET as environment variables, or
+# they fall back to the defaults below for development.
+import os as _os
+SH_TOKEN_URL = "https://services.sentinel-hub.com/auth/realms/main/protocol/openid-connect/token"
+SH_PROCESS_URL = "https://services.sentinel-hub.com/api/v1/process"
+SH_CLIENT_ID = _os.environ.get("SH_CLIENT_ID", "sh-fcaefd7b-0d8c-49b0-bd4f-f6b1eccc9a14")
+SH_CLIENT_SECRET = _os.environ.get("SH_CLIENT_SECRET", "MYtX5ZWGdT4nnApKxUbU8EdwusYBriY6")

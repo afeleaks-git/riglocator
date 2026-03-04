@@ -270,6 +270,91 @@ def classify_detections(
     return detections
 
 
+def deduplicate_by_pad(
+    detections: gpd.GeoDataFrame,
+    pad_radius_m: float = 250.0,
+) -> gpd.GeoDataFrame:
+    """
+    Group nearby wells into pads and keep one detection per pad.
+
+    In the Permian, multiple horizontal wells are often drilled from the
+    same surface pad (e.g., 2-4 wells targeting different zones like
+    Wolfcamp A, Wolfcamp B, Bone Spring). A single rig services all
+    wells on the pad sequentially. Counting each well as a separate rig
+    would overcount.
+
+    Groups wells within pad_radius_m of each other, then keeps the
+    highest-confidence detection per group as the pad representative.
+    """
+    if len(detections) == 0:
+        return detections
+
+    # Project to UTM for metric distances
+    det_utm = detections.to_crs("EPSG:32613")
+
+    # Simple spatial clustering: assign each well to a pad group
+    pad_ids = [-1] * len(det_utm)
+    next_pad = 0
+
+    for i, (idx_i, row_i) in enumerate(det_utm.iterrows()):
+        if pad_ids[i] >= 0:
+            continue
+        # Start a new pad group
+        pad_ids[i] = next_pad
+        for j, (idx_j, row_j) in enumerate(det_utm.iterrows()):
+            if j <= i or pad_ids[j] >= 0:
+                continue
+            dist = row_i.geometry.distance(row_j.geometry)
+            if dist <= pad_radius_m:
+                pad_ids[j] = next_pad
+        next_pad += 1
+
+    detections = detections.copy()
+    detections["pad_group"] = pad_ids
+
+    # Count wells per pad for reporting
+    pad_sizes = detections.groupby("pad_group").size()
+    multi_well_pads = (pad_sizes > 1).sum()
+    if multi_well_pads > 0:
+        logger.info(
+            f"Pad deduplication: {len(detections)} wells -> {next_pad} pads "
+            f"({multi_well_pads} multi-well pads)"
+        )
+
+    # Rank detections: prefer HIGH confidence DRILLING_RIG, then by combined score
+    confidence_rank = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
+    activity_rank = {
+        "DRILLING_RIG": 5, "PROBABLE_DRILLING": 4,
+        "COMPLETION_RIG": 3, "PAD_CONSTRUCTION": 2, "NO_ACTIVITY": 1,
+    }
+    detections["_conf_rank"] = detections["confidence"].map(confidence_rank).fillna(0)
+    detections["_act_rank"] = detections["activity_class"].map(activity_rank).fillna(0)
+
+    # Keep the best detection per pad
+    deduped = (
+        detections
+        .sort_values(["_act_rank", "_conf_rank", "combined_score_max"], ascending=False)
+        .groupby("pad_group")
+        .first()
+        .reset_index()
+    )
+
+    # Add count of wells on this pad
+    deduped["wells_on_pad"] = deduped["pad_group"].map(pad_sizes)
+
+    # Clean up temp columns
+    deduped = deduped.drop(columns=["_conf_rank", "_act_rank"])
+
+    # Restore as GeoDataFrame
+    deduped = gpd.GeoDataFrame(deduped, geometry="geometry", crs=detections.crs)
+
+    logger.info(
+        f"After dedup: {len(deduped)} unique pads "
+        f"(was {len(detections)} individual wells)"
+    )
+    return deduped
+
+
 def estimate_rig_vs_completion(
     detections: gpd.GeoDataFrame,
     rig_count_target: int,

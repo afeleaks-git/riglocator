@@ -40,7 +40,7 @@ from satellite import (
 )
 from change_detection import (
     detect_pad_changes, extract_well_signatures, classify_detections,
-    estimate_rig_vs_completion,
+    deduplicate_by_pad, estimate_rig_vs_completion,
 )
 
 logger = logging.getLogger(__name__)
@@ -155,15 +155,34 @@ def run_pipeline(
     print(f"STEP 5: Change Detection Analysis")
     print(f"{'='*80}")
 
-    before_scene = create_synthetic_scene(permits, before_start)
-    during_scene = create_synthetic_scene(
-        permits, during_start, active_wells=active_drilling
-    )
+    # Try real Sentinel Hub data first, fall back to synthetic
+    real_data = False
+    try:
+        from sentinel_hub import download_scene_pair
+        bbox = get_search_bbox(permits)
+        before_scene, during_scene = download_scene_pair(
+            bbox, before_start, before_end, during_start, during_end,
+        )
+        if before_scene is not None and during_scene is not None:
+            real_data = True
+            print(f"  Using REAL Sentinel-2 imagery from Sentinel Hub")
+            print(f"  Before scene: {before_scene['width']}x{before_scene['height']}px, {before_scene['cloud_pct']:.1f}% cloud")
+            print(f"  During scene: {during_scene['width']}x{during_scene['height']}px, {during_scene['cloud_pct']:.1f}% cloud")
+    except Exception as e:
+        logger.info(f"Sentinel Hub unavailable ({e}), using synthetic scenes")
+
+    if not real_data:
+        print(f"  Using SYNTHETIC scenes (Sentinel Hub not available)")
+        before_scene = create_synthetic_scene(permits, before_start)
+        during_scene = create_synthetic_scene(
+            permits, during_start, active_wells=active_drilling
+        )
 
     changes = detect_pad_changes(before_scene, during_scene)
     detections = extract_well_signatures(changes, permits)
 
     print(f"  Analyzed {len(detections)} well locations")
+    print(f"  Data source: {'REAL Sentinel-2' if real_data else 'SYNTHETIC'}")
     print(f"  NDVI change range: {detections['ndvi_change_mean'].min():.3f} to {detections['ndvi_change_mean'].max():.3f}")
     print(f"  Brightness change range: {detections['brightness_change_mean'].min():.3f} to {detections['brightness_change_mean'].max():.3f}")
 
@@ -175,15 +194,32 @@ def run_pipeline(
     print(f"{'='*80}")
 
     classified = classify_detections(detections, analysis_date=during_end)
-    results["classifications"] = classified["activity_class"].value_counts().to_dict()
 
-    print(f"\n  Classification summary:")
+    print(f"\n  Per-well classification (before dedup):")
     for cls, count in classified["activity_class"].value_counts().items():
         print(f"    {cls}: {count}")
 
-    print(f"\n  Detailed results:")
+    # =====================================================================
+    # STEP 6b: Pad-Level Deduplication
+    # =====================================================================
+    print(f"\n  Deduplicating wells on same pad (within 250m)...")
+    classified = deduplicate_by_pad(classified, pad_radius_m=250.0)
+    results["classifications"] = classified["activity_class"].value_counts().to_dict()
+
+    print(f"\n  After dedup (unique pads):")
+    for cls, count in classified["activity_class"].value_counts().items():
+        print(f"    {cls}: {count}")
+
+    multi = classified[classified["wells_on_pad"] > 1]
+    if len(multi) > 0:
+        print(f"\n  Multi-well pads (single rig serves multiple wells):")
+        for _, row in multi.iterrows():
+            print(f"    Pad {row['pad_group']}: {row['wells_on_pad']} wells "
+                  f"- {row['LEASE_NAME']} ({row['activity_class']})")
+
+    print(f"\n  Detailed results (one row per pad):")
     display_cols = ["PERMIT_NO", "LEASE_NAME", "OPERATOR_NAME", "SPUD_DATE",
-                    "activity_class", "confidence"]
+                    "activity_class", "confidence", "wells_on_pad"]
     print(classified[display_cols].to_string(index=False))
 
     # =====================================================================
