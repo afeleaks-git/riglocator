@@ -36,55 +36,52 @@ def create_sample_afe_data() -> pd.DataFrame:
     - Matching AFE cost data to known drilling activity
     - Finding wells AFE Leaks doesn't have coverage for yet
     - Identifying cost patterns for wells at different drilling stages
+
+    AFE Leaks doesn't cover every well - there are always coverage gaps.
+    Typically ~55-65% of active wells have AFE data. The gaps are what
+    make this analysis valuable: you can see what you're missing.
     """
-    records = [
-        # Wells AFE Leaks has cost data for
-        {"api_no": "38938901", "operator": "DIAMONDBACK ENERGY",
-         "lease_name": "UNIVERSITY LANDS 45-08", "well_no": "1H",
-         "afe_amount": 8500000, "afe_status": "CLOSED",
-         "cost_per_foot": 425, "target_formation": "WOLFCAMP A"},
+    import random
+    random.seed(99)
 
-        {"api_no": "38938902", "operator": "APACHE CORP",
-         "lease_name": "STATE ANTELOPE 22-15", "well_no": "2H",
-         "afe_amount": 9300000, "afe_status": "ACTIVE",
-         "cost_per_foot": 465, "target_formation": "BONE SPRING"},
+    # Generate AFE records for a subset of the permit API numbers
+    # AFE Leaks won't have every well - realistic coverage is ~60%
+    api_start = 38938001
+    total_permits = 96  # Match the sample permit count
+    coverage_rate = 0.60
 
-        {"api_no": "38938904", "operator": "OXY USA",
-         "lease_name": "PECOS VALLEY 31-42", "well_no": "1AH",
-         "afe_amount": 9200000, "afe_status": "ACTIVE",
-         "cost_per_foot": 460, "target_formation": "WOLFCAMP A"},
+    formations = ["WOLFCAMP A", "WOLFCAMP B", "BONE SPRING", "3RD BONE SPRING",
+                   "2ND BONE SPRING", "AVALON"]
 
-        {"api_no": "38938907", "operator": "DIAMONDBACK ENERGY",
-         "lease_name": "DELAWARE MOUNTAIN A", "well_no": "5H",
-         "afe_amount": 8800000, "afe_status": "ACTIVE",
-         "cost_per_foot": 440, "target_formation": "WOLFCAMP B"},
+    records = []
+    for i in range(total_permits):
+        if random.random() > coverage_rate:
+            continue  # AFE Leaks doesn't have this one
 
-        {"api_no": "38938908", "operator": "DEVON ENERGY",
-         "lease_name": "WOLFCAMP STATE 44-05", "well_no": "1H",
-         "afe_amount": 9500000, "afe_status": "ACTIVE",
-         "cost_per_foot": 475, "target_formation": "WOLFCAMP A"},
+        api_no = str(api_start + i)
+        # AFE amounts for Delaware Basin horizontal wells: $7.5M-$12M typical
+        afe_amount = random.randint(7500, 12000) * 1000
+        cost_per_foot = random.randint(375, 550)
 
-        {"api_no": "38938911", "operator": "PIONEER NATURAL RES",
-         "lease_name": "RATTLESNAKE UNIT B", "well_no": "6H",
-         "afe_amount": 8900000, "afe_status": "ACTIVE",
-         "cost_per_foot": 445, "target_formation": "BONE SPRING"},
+        # AFE status depends on how old the well is
+        status_roll = random.random()
+        if status_roll < 0.15:
+            afe_status = "CLOSED"  # Completed, AFE closed out
+        elif status_roll < 0.70:
+            afe_status = "ACTIVE"  # Currently active AFE
+        else:
+            afe_status = "PENDING"  # AFE filed but not yet active
 
-        {"api_no": "38938913", "operator": "CHEVRON USA",
-         "lease_name": "SOUTH PECOS UNIT", "well_no": "4AH",
-         "afe_amount": 10100000, "afe_status": "ACTIVE",
-         "cost_per_foot": 505, "target_formation": "WOLFCAMP A"},
+        records.append({
+            "api_no": api_no,
+            "operator": "",  # Will match from permits
+            "afe_amount": afe_amount,
+            "afe_status": afe_status,
+            "cost_per_foot": cost_per_foot,
+            "target_formation": random.choice(formations),
+        })
 
-        {"api_no": "38938905", "operator": "CENTENNIAL RESOURCE",
-         "lease_name": "RED HILLS STATE", "well_no": "4H",
-         "afe_amount": 8700000, "afe_status": "PENDING",
-         "cost_per_foot": 435, "target_formation": "WOLFCAMP B"},
-
-        {"api_no": "38938914", "operator": "OXY USA",
-         "lease_name": "BALMORHEA STATE 12", "well_no": "2H",
-         "afe_amount": 8600000, "afe_status": "PENDING",
-         "cost_per_foot": 430, "target_formation": "BONE SPRING"},
-    ]
-
+    logger.info(f"Generated {len(records)} AFE records (~{coverage_rate:.0%} coverage of {total_permits} permits)")
     return pd.DataFrame(records)
 
 

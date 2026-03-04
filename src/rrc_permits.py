@@ -17,7 +17,7 @@ import os
 import io
 import zipfile
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 import pandas as pd
 import geopandas as gpd
@@ -153,32 +153,84 @@ def merge_permit_with_status(permits: pd.DataFrame, status: pd.DataFrame) -> pd.
 
 def filter_reeves_county_horizontal(df: pd.DataFrame, year: int = None, month: int = None) -> pd.DataFrame:
     """
-    Filter permits to Reeves County horizontal wells, optionally for a specific period.
+    Filter permits to Reeves County horizontal wells that are relevant to
+    the analysis period.
+
+    We want ALL permits for the county where either:
+    1. Spud date >= analysis period start (spud during or after our window)
+    2. Spud date is missing/null (no spud reported - could be drilling,
+       could be not started, satellite needs to check)
+    3. Spud date is before our window BUT no completion date yet
+       (still drilling through our period)
+
+    This is NOT just permits filed in the analysis month. A well permitted
+    6 months ago could still be drilling now. We need the full picture of
+    what could have an active rig during the period.
     """
     county_code = RRC_COUNTY_CODES.get(COUNTY, "389")
 
-    # Filter by county and well direction
+    # Base filter: Reeves County horizontal wells in District 08
     mask = (
         (df["COUNTY_CODE"] == county_code)
         & (df["WELL_DIRECTION"] == WELL_DIRECTION)
         & (df["DISTRICT"] == RRC_DISTRICT)
     )
 
-    if year and month:
-        # Filter by permit approval date
-        def in_period(date_str):
-            try:
-                dt = datetime.strptime(date_str, "%Y%m%d")
-                return dt.year == year and dt.month == month
-            except (ValueError, TypeError):
-                return False
-
-        mask = mask & df["PERMIT_APPROVAL_DATE"].apply(in_period)
-
     filtered = df[mask].copy()
+
+    if year and month:
+        period_start = f"{year}{month:02d}01"
+
+        # Parse spud date for filtering
+        if "SPUD_DATE_parsed" in filtered.columns:
+            spud_col = "SPUD_DATE_parsed"
+        else:
+            filtered["_spud_parsed"] = pd.to_datetime(
+                filtered.get("SPUD_DATE", pd.Series(dtype=str)),
+                format="%Y%m%d", errors="coerce"
+            )
+            spud_col = "_spud_parsed"
+
+        if "COMPLETION_DATE_parsed" in filtered.columns:
+            comp_col = "COMPLETION_DATE_parsed"
+        else:
+            filtered["_comp_parsed"] = pd.to_datetime(
+                filtered.get("COMPLETION_DATE", pd.Series(dtype=str)),
+                format="%Y%m%d", errors="coerce"
+            )
+            comp_col = "_comp_parsed"
+
+        period_start_ts = pd.Timestamp(year, month, 1)
+
+        # Keep permits where:
+        time_mask = (
+            # No spud date at all - could be active, satellite needs to check
+            filtered[spud_col].isna()
+            # Spud on or after the start of our period
+            | (filtered[spud_col] >= period_start_ts)
+            # Spud before our period but not yet completed (still drilling)
+            | (
+                (filtered[spud_col] < period_start_ts)
+                & (filtered[comp_col].isna())
+            )
+            # Spud before but completion falls in or after our period
+            | (
+                (filtered[spud_col] < period_start_ts)
+                & (filtered[comp_col] >= period_start_ts)
+            )
+        )
+
+        filtered = filtered[time_mask].copy()
+
+        # Clean up temp columns
+        for col in ["_spud_parsed", "_comp_parsed"]:
+            if col in filtered.columns:
+                filtered = filtered.drop(columns=[col])
+
     logger.info(
-        f"Filtered to {len(filtered)} Reeves County horizontal permits"
-        + (f" for {year}-{month:02d}" if year and month else "")
+        f"Filtered to {len(filtered)} Reeves County horizontal permits "
+        f"relevant to {year}-{month:02d}" if year and month
+        else f"Filtered to {len(filtered)} Reeves County horizontal permits (all time)"
     )
     return filtered
 
@@ -218,87 +270,132 @@ def create_sample_permit_data() -> gpd.GeoDataFrame:
     """
     Create representative sample data based on known Reeves County permit patterns.
 
-    This generates realistic permit records for methodology development when
-    the actual RRC download isn't available. Based on public RRC data patterns
-    for the Delaware Basin / Reeves County area.
+    Reeves County is one of the most active drilling counties in the US.
+    At any given time there are typically 15-25 active rigs, and the total
+    inventory of permits that are relevant (permitted, drilling, completing,
+    recently completed) easily runs 80-120+.
 
-    Real Reeves County horizontal wells cluster in several areas:
-    - Northern Reeves (near Mentone): ~31.4°N, -103.6°W
-    - Central Reeves (Pecos area): ~31.2°N, -103.5°W
-    - Southern Reeves: ~31.0°N, -103.7°W
+    The sample covers the full spectrum you'd see pulling the actual RRC data:
+    - Wells permitted months ago, already completed (done)
+    - Wells spud in Dec/Jan, still drilling through Feb
+    - Wells spud in Feb (new drilling starts)
+    - Wells permitted but no spud date (backlog / not started)
+    - Wells in completion (spud 30-60 days ago, rig released, frac crew on site)
+
+    Locations spread across the major drilling areas in Reeves County:
+    - Northern (near Mentone): ~31.35-31.55°N, heavy Diamondback/Apache area
+    - Central (Pecos corridor): ~31.15-31.35°N, Oxy/ConocoPhillips/Devon
+    - Southern: ~30.95-31.15°N, Chevron/EOG territory
     """
-    # Representative well locations based on typical Reeves County drilling areas.
-    # Spud dates come from the RRC permit file itself (status/trailer records).
-    # SPUD_DATE = None means the permit exists but no spud has been reported yet.
-    wells = [
-        # Northern Reeves - heavy Delaware Basin activity
-        {"PERMIT_NO": "900001", "LEASE_NAME": "UNIVERSITY LANDS 45-08", "WELL_NO": "1H",
-         "OPERATOR_NAME": "DIAMONDBACK ENERGY", "lat": 31.45, "lon": -103.58,
-         "PERMIT_APPROVAL_DATE": "20260115", "API_NO": "38938901",
-         "SPUD_DATE": "20260120", "COMPLETION_DATE": "20260228"},  # Spud Jan, completed Feb
-        {"PERMIT_NO": "900002", "LEASE_NAME": "STATE ANTELOPE 22-15", "WELL_NO": "2H",
-         "OPERATOR_NAME": "APACHE CORP", "lat": 31.42, "lon": -103.62,
-         "PERMIT_APPROVAL_DATE": "20260118", "API_NO": "38938902",
-         "SPUD_DATE": "20260125", "COMPLETION_DATE": None},  # Spud Jan, still drilling in Feb
-        {"PERMIT_NO": "900003", "LEASE_NAME": "SIDEWINDER UNIT A", "WELL_NO": "3H",
-         "OPERATOR_NAME": "CONOCOPHILLIPS", "lat": 31.48, "lon": -103.55,
-         "PERMIT_APPROVAL_DATE": "20260120", "API_NO": "38938903",
-         "SPUD_DATE": None, "COMPLETION_DATE": None},  # Permitted, no spud yet
+    import random
+    random.seed(42)
 
-        # Central Reeves - near Pecos
-        {"PERMIT_NO": "900004", "LEASE_NAME": "PECOS VALLEY 31-42", "WELL_NO": "1AH",
-         "OPERATOR_NAME": "OXY USA", "lat": 31.22, "lon": -103.50,
-         "PERMIT_APPROVAL_DATE": "20260125", "API_NO": "38938904",
-         "SPUD_DATE": "20260201", "COMPLETION_DATE": None},  # Spud Feb 1, actively drilling
-        {"PERMIT_NO": "900005", "LEASE_NAME": "RED HILLS STATE", "WELL_NO": "4H",
-         "OPERATOR_NAME": "CENTENNIAL RESOURCE", "lat": 31.25, "lon": -103.48,
-         "PERMIT_APPROVAL_DATE": "20260128", "API_NO": "38938905",
-         "SPUD_DATE": None, "COMPLETION_DATE": None},  # Permitted, no spud
-        {"PERMIT_NO": "900006", "LEASE_NAME": "MUSTANG SPRINGS 15-22", "WELL_NO": "2H",
-         "OPERATOR_NAME": "RING ENERGY", "lat": 31.18, "lon": -103.53,
-         "PERMIT_APPROVAL_DATE": "20260201", "API_NO": "38938906",
-         "SPUD_DATE": "20260205", "COMPLETION_DATE": None},  # Spud Feb 5
-
-        # Active Feb drilling cluster
-        {"PERMIT_NO": "900007", "LEASE_NAME": "DELAWARE MOUNTAIN A", "WELL_NO": "5H",
-         "OPERATOR_NAME": "DIAMONDBACK ENERGY", "lat": 31.35, "lon": -103.65,
-         "PERMIT_APPROVAL_DATE": "20260203", "API_NO": "38938907",
-         "SPUD_DATE": "20260205", "COMPLETION_DATE": None},  # Spud Feb 5
-        {"PERMIT_NO": "900008", "LEASE_NAME": "WOLFCAMP STATE 44-05", "WELL_NO": "1H",
-         "OPERATOR_NAME": "DEVON ENERGY", "lat": 31.38, "lon": -103.60,
-         "PERMIT_APPROVAL_DATE": "20260205", "API_NO": "38938908",
-         "SPUD_DATE": "20260208", "COMPLETION_DATE": None},  # Spud Feb 8
-        {"PERMIT_NO": "900009", "LEASE_NAME": "BONE SPRING RANCH", "WELL_NO": "3AH",
-         "OPERATOR_NAME": "EOG RESOURCES", "lat": 31.30, "lon": -103.70,
-         "PERMIT_APPROVAL_DATE": "20260208", "API_NO": "38938909",
-         "SPUD_DATE": "20260210", "COMPLETION_DATE": None},  # Spud Feb 10
-        {"PERMIT_NO": "900010", "LEASE_NAME": "GUADALUPE PASS 18-07", "WELL_NO": "2H",
-         "OPERATOR_NAME": "APACHE CORP", "lat": 31.33, "lon": -103.55,
-         "PERMIT_APPROVAL_DATE": "20260210", "API_NO": "38938910",
-         "SPUD_DATE": None, "COMPLETION_DATE": None},  # Permitted, no spud
-        {"PERMIT_NO": "900011", "LEASE_NAME": "RATTLESNAKE UNIT B", "WELL_NO": "6H",
-         "OPERATOR_NAME": "PIONEER NATURAL RES", "lat": 31.40, "lon": -103.57,
-         "PERMIT_APPROVAL_DATE": "20260212", "API_NO": "38938911",
-         "SPUD_DATE": "20260214", "COMPLETION_DATE": None},  # Spud Feb 14
-        {"PERMIT_NO": "900012", "LEASE_NAME": "TOYAH CREEK 28-33", "WELL_NO": "1H",
-         "OPERATOR_NAME": "CONOCOPHILLIPS", "lat": 31.28, "lon": -103.63,
-         "PERMIT_APPROVAL_DATE": "20260215", "API_NO": "38938912",
-         "SPUD_DATE": "20260218", "COMPLETION_DATE": None},  # Spud Feb 18
-
-        # Southern Reeves
-        {"PERMIT_NO": "900013", "LEASE_NAME": "SOUTH PECOS UNIT", "WELL_NO": "4AH",
-         "OPERATOR_NAME": "CHEVRON USA", "lat": 31.05, "lon": -103.72,
-         "PERMIT_APPROVAL_DATE": "20260218", "API_NO": "38938913",
-         "SPUD_DATE": "20260220", "COMPLETION_DATE": None},  # Spud Feb 20
-        {"PERMIT_NO": "900014", "LEASE_NAME": "BALMORHEA STATE 12", "WELL_NO": "2H",
-         "OPERATOR_NAME": "OXY USA", "lat": 31.02, "lon": -103.68,
-         "PERMIT_APPROVAL_DATE": "20260220", "API_NO": "38938914",
-         "SPUD_DATE": None, "COMPLETION_DATE": None},  # Permitted, no spud
-        {"PERMIT_NO": "900015", "LEASE_NAME": "PHANTOM RANCH 41-04", "WELL_NO": "7H",
-         "OPERATOR_NAME": "DIAMONDBACK ENERGY", "lat": 31.10, "lon": -103.75,
-         "PERMIT_APPROVAL_DATE": "20260222", "API_NO": "38938915",
-         "SPUD_DATE": "20260224", "COMPLETION_DATE": None},  # Spud Feb 24
+    # Major operators and their approximate well counts / areas in Reeves
+    operators = [
+        ("DIAMONDBACK ENERGY", 18, 31.38, -103.60),
+        ("APACHE CORP", 12, 31.42, -103.62),
+        ("CONOCOPHILLIPS", 10, 31.30, -103.55),
+        ("OXY USA", 10, 31.20, -103.50),
+        ("EOG RESOURCES", 8, 31.10, -103.68),
+        ("DEVON ENERGY", 7, 31.35, -103.58),
+        ("CENTENNIAL RESOURCE", 6, 31.25, -103.48),
+        ("PIONEER NATURAL RES", 5, 31.40, -103.57),
+        ("RING ENERGY", 4, 31.18, -103.53),
+        ("CHEVRON USA", 4, 31.05, -103.72),
+        ("MARATHON OIL", 3, 31.28, -103.65),
+        ("CIMAREX ENERGY", 3, 31.32, -103.70),
+        ("MEWBOURNE OIL", 2, 31.45, -103.55),
+        ("FASKEN OIL", 2, 31.48, -103.58),
+        ("COLGATE ENERGY", 2, 31.15, -103.60),
     ]
+
+    lease_prefixes = [
+        "UNIVERSITY LANDS", "STATE", "PECOS VALLEY", "RED HILLS",
+        "MUSTANG SPRINGS", "DELAWARE MOUNTAIN", "WOLFCAMP", "BONE SPRING",
+        "GUADALUPE PASS", "RATTLESNAKE", "TOYAH CREEK", "PHANTOM RANCH",
+        "BALMORHEA", "SOUTH PECOS", "SIDEWINDER", "APACHE DRAW",
+        "SAND HILLS", "CEDAR LAKE", "MENTONE", "BELL CANYON",
+        "CHERRY CANYON", "BRUSHY CANYON", "AVALON SHALE", "THIRD BONE",
+        "UPPER WOLFCAMP", "LOWER WOLFCAMP", "SECOND BONE", "FIRST BONE",
+    ]
+
+    formations = ["WOLFCAMP A", "WOLFCAMP B", "BONE SPRING", "3RD BONE SPRING",
+                   "2ND BONE SPRING", "AVALON", "WOLFCAMP D"]
+
+    wells = []
+    permit_counter = 900001
+    api_counter = 38938001
+
+    for operator_name, well_count, center_lat, center_lon in operators:
+        for i in range(well_count):
+            # Scatter wells around operator's center area
+            lat = center_lat + random.uniform(-0.08, 0.08)
+            lon = center_lon + random.uniform(-0.08, 0.08)
+            # Clamp to Reeves County bounds
+            lat = max(30.95, min(31.60, lat))
+            lon = max(-104.15, min(-103.38, lon))
+
+            lease = random.choice(lease_prefixes)
+            section = random.randint(1, 48)
+            block = random.randint(1, 60)
+            well_no_num = random.randint(1, 8)
+            well_suffix = random.choice(["H", "AH", "BH", "CH"])
+            well_no = f"{well_no_num}{well_suffix}"
+
+            # Permit dates spread over last 6 months
+            days_ago_permit = random.randint(10, 180)
+            permit_date = date(2026, 2, 28) - timedelta(days=days_ago_permit)
+            permit_str = permit_date.strftime("%Y%m%d")
+
+            # Determine spud/completion status
+            # This is the realistic distribution for Reeves County:
+            status_roll = random.random()
+
+            if status_roll < 0.12:
+                # ~12% completed before Feb (spud 60-120 days ago, completed)
+                spud_days_ago = random.randint(60, 120)
+                spud_d = date(2026, 2, 28) - timedelta(days=spud_days_ago)
+                comp_d = spud_d + timedelta(days=random.randint(20, 35))
+                spud_str = spud_d.strftime("%Y%m%d")
+                comp_str = comp_d.strftime("%Y%m%d")
+            elif status_roll < 0.25:
+                # ~13% spud before Feb, completing in Feb (spud 35-60 days ago)
+                spud_days_ago = random.randint(35, 60)
+                spud_d = date(2026, 2, 28) - timedelta(days=spud_days_ago)
+                comp_d = date(2026, 2, 1) + timedelta(days=random.randint(5, 25))
+                spud_str = spud_d.strftime("%Y%m%d")
+                comp_str = comp_d.strftime("%Y%m%d")
+            elif status_roll < 0.40:
+                # ~15% spud in Jan, still drilling through Feb (no completion)
+                spud_d = date(2026, 1, 1) + timedelta(days=random.randint(5, 28))
+                spud_str = spud_d.strftime("%Y%m%d")
+                comp_str = None
+            elif status_roll < 0.62:
+                # ~22% spud in Feb (actively drilling)
+                spud_d = date(2026, 2, 1) + timedelta(days=random.randint(0, 25))
+                spud_str = spud_d.strftime("%Y%m%d")
+                comp_str = None
+            else:
+                # ~38% permitted but NO spud date
+                spud_str = None
+                comp_str = None
+
+            wells.append({
+                "PERMIT_NO": str(permit_counter),
+                "LEASE_NAME": f"{lease} {section:02d}-{block:02d}",
+                "WELL_NO": well_no,
+                "OPERATOR_NAME": operator_name,
+                "lat": round(lat, 6),
+                "lon": round(lon, 6),
+                "PERMIT_APPROVAL_DATE": permit_str,
+                "API_NO": str(api_counter),
+                "SPUD_DATE": spud_str,
+                "COMPLETION_DATE": comp_str,
+                "TARGET_FORMATION": random.choice(formations),
+            })
+
+            permit_counter += 1
+            api_counter += 1
 
     df = pd.DataFrame(wells)
     df["DISTRICT"] = RRC_DISTRICT
