@@ -1,0 +1,19 @@
+# Data files (large)
+data/satellite/*.tif
+data/satellite/*.tiff
+data/rrc/*.zip
+data/output/*.tif
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
