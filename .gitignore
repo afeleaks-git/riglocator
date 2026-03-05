@@ -15,5 +15,18 @@ venv/
 .vscode/
 .idea/
 
+# Cache (satellite tiles)
+data/cache/
+data/sar_cache/
+data/sar_raw/
+
+# Secrets
+.env
+
+# Temp/generated
+_gen*.py
+backtest_errors.log
+.playwright-mcp/
+
 # OS
 .DS_Store
